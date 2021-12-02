@@ -1,1 +1,1 @@
-
+Extract the correspondences of all files in the data set, and divide them into Train/Test/Valid according to the ratio of 80%/10%/10%, and randomly select {8-12} positive and negative examples according to the data set (the number is not fixed) Generate sort-pairs file
