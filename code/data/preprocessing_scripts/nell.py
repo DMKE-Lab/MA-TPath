@@ -96,6 +96,3 @@ with open(vocab_dir + '/entity_vocab.json', 'w') as fout:
     json.dump(entity_vocab, fout)
 with open(vocab_dir + '/relation_vocab.json', 'w') as fout:
     json.dump(relation_vocab, fout)
-
-
-
