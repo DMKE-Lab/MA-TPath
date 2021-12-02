@@ -18,6 +18,8 @@ import sys
 from code.model.baseline import ReactiveBaseline
 from code.model.nell_eval import nell_eval
 from scipy.misc import logsumexp as lse
+import torch
+from scipy.stats import pearsonr
 logger = logging.getLogger()
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 class Trainer(object):
@@ -49,6 +51,17 @@ class Trainer(object):
         self.loss_before_reg = loss
         total_loss = tf.reduce_mean(loss) - self.decaying_beta * self.entropy_reg_loss(self.per_example_logits)  # scalar
         return total_loss
+    def calc_reinforce_ent_loss(self):
+        loss = tf.stack(self.per_example_ent_loss, axis=1)
+        self.tf_baseline = self.baseline.get_baseline_value()
+        final_reward = self.cum_discounted_reward - self.tf_baseline
+        reward_mean, reward_var = tf.nn.moments(final_reward, axes=[0, 1])
+        reward_std = tf.sqrt(reward_var) + 1e-6
+        final_reward = tf.div(final_reward - reward_mean, reward_std)
+        loss = tf.multiply(loss, final_reward)
+        self.loss_before_reg = loss
+        total_loss = tf.reduce_mean(loss) - self.decaying_beta * self.entropy_reg_loss(self.per_example_ent_logits)
+        return total_loss
     def entropy_reg_loss(self, all_logits):
         all_logits = tf.stack(all_logits, axis=2)
         entropy_policy = - tf.reduce_mean(tf.reduce_sum(tf.multiply(tf.exp(all_logits), all_logits), axis=1))  # scalar
@@ -65,13 +78,18 @@ class Trainer(object):
         self.query_tim = tf.placeholder(tf.int32, [None], name="query_tim")
         self.range_arr = tf.placeholder(tf.int32, shape=[None, ])
         self.global_step = tf.Variable(0, trainable=False)
-        self.decaying_beta = tf.train.exponential_decay(self.beta, self.global_step, 200, 0.90, staircase=False)
+        self.decaying_beta = tf.train.exponential_decay(self.beta, self.global_step,
+                                                   200, 0.90, staircase=False)
         self.entity_sequence = []
-        self.cum_discounted_reward = tf.placeholder(tf.float32, [None, self.path_length], name="cumulative_discounted_reward")
+        self.cum_discounted_reward = tf.placeholder(tf.float32, [None, self.path_length],
+                                                    name="cumulative_discounted_reward")
         for t in range(self.path_length):
-            next_possible_relations = tf.placeholder(tf.int32, [None, self.max_num_actions], name="next_relations_{}".format(t))
-            next_possible_tims = tf.placeholder(tf.int32, [None, self.max_num_actions], name="next_tims_{}".format(t))
-            next_possible_entities = tf.placeholder(tf.int32, [None, self.max_num_actions], name="next_entities_{}".format(t))
+            next_possible_relations = tf.placeholder(tf.int32, [None, self.max_num_actions],
+                                                   name="next_relations_{}".format(t))
+            next_possible_tims = tf.placeholder(tf.int32, [None, self.max_num_actions],
+                                                     name="next_tims_{}".format(t))
+            next_possible_entities = tf.placeholder(tf.int32, [None, self.max_num_actions],
+                                                     name="next_entities_{}".format(t))
             input_label_relation = tf.placeholder(tf.int32, [None], name="input_label_relation_{}".format(t))
             input_label_tim = tf.placeholder(tf.int32, [None], name="input_label_tim_{}".format(t))
             start_entities = tf.placeholder(tf.int32, [None, ])
@@ -81,8 +99,8 @@ class Trainer(object):
             self.candidate_tim_sequence.append(next_possible_tims)
             self.candidate_entity_sequence.append(next_possible_entities)
             self.entity_sequence.append(start_entities)
-            self.loss_before_reg = tf.constant(0.0)
-            self.per_example_loss, self.per_example_logits, self.action_idx, self.tim_idx = self.agent(
+        self.loss_before_reg = tf.constant(0.0)
+        self.per_example_loss, self.per_example_logits, self.action_idx, self.tim_idx = self.agent(
             self.candidate_relation_sequence, self.candidate_tim_sequence,
             self.candidate_entity_sequence, self.entity_sequence,
             self.input_path, self.input_path_tim,
@@ -133,21 +151,30 @@ class Trainer(object):
         grads = tf.gradients(cost, tvars)
         grads, _ = tf.clip_by_global_norm(grads, self.grad_clip_norm)
         train_op = self.optimizer.apply_gradients(zip(grads, tvars))
-        with tf.control_dependencies([train_op]):  # see https://github.com/tensorflow/tensorflow/issues/1899
+        with tf.control_dependencies([train_op]):
             self.dummy = tf.constant(0)
         return train_op
+    def bp_ent(self, cost):
+        self.baseline.update(tf.reduce_mean(self.cum_discounted_reward))
+        tvars = tf.trainable_variables()
+        grads = tf.gradients(cost, tvars)
+        grads, _ = tf.clip_by_global_norm(grads, self.grad_clip_norm)
+        train_op = self.optimizer.apply_gradients(zip(grads, tvars))
+        with tf.control_dependencies([train_op]):
+            self.dummy1 = tf.constant(0)
+        return train_op
     def calc_cum_discounted_reward(self, rewards):
-        running_add = np.zeros([rewards.shape[0]])  # [B]
-        cum_disc_reward = np.zeros([rewards.shape[0], self.path_length])  # [B, T]
+        running_add = np.zeros([rewards.shape[0]])
+        cum_disc_reward = np.zeros([rewards.shape[0], self.path_length])
         cum_disc_reward[:,
-        self.path_length - 1] = rewards  # set the last time step to the reward received at the last state
+        self.path_length - 1] = rewards
         for t in reversed(range(self.path_length)):
             running_add = self.gamma * running_add + cum_disc_reward[:, t]
             cum_disc_reward[:, t] = running_add
         return cum_disc_reward
     def gpu_io_setup(self):
         fetches = self.per_example_loss  + self.action_idx + self.tim_idx + [self.loss_op] + self.per_example_logits + [self.dummy]
-        feeds = [self.first_state_of_test] + self.candidate_relation_sequence + self.candidate_tim_sequence + self.candidate_entity_sequence + self.input_path + self.input_path_tim + \
+        feeds =  [self.first_state_of_test] + self.candidate_relation_sequence + self.candidate_tim_sequence + self.candidate_entity_sequence + self.input_path + self.input_path_tim + \
                 [self.query_relation] + [self.query_tim] + [self.cum_discounted_reward] + [self.range_arr] + self.entity_sequence
         feed_dict = [{} for _ in range(self.path_length)]
         feed_dict[0][self.first_state_of_test] = False
@@ -165,6 +192,7 @@ class Trainer(object):
     def train(self, sess):
         fetches, feeds, feed_dict = self.gpu_io_setup()
         train_loss = 0.0
+        start_time = time.time()
         self.batch_counter = 0
         for episode in self.train_environment.get_episodes():
             self.batch_counter += 1
@@ -184,6 +212,7 @@ class Trainer(object):
                 loss_before_regularization.append(per_example_loss)
                 logits.append(per_example_logits)
                 state = episode(action_idx)
+            loss_before_regularization = np.stack(loss_before_regularization, axis=1)
             rewards = episode.get_reward()
             cum_discounted_reward = self.calc_cum_discounted_reward(rewards)
             batch_total_loss, _ = sess.partial_run(h, [self.loss_op, self.dummy],
@@ -191,7 +220,7 @@ class Trainer(object):
             train_loss = 0.98 * train_loss + 0.02 * batch_total_loss
             avg_reward = np.mean(rewards)
             reward_reshape = np.reshape(rewards, (self.batch_size, self.num_rollouts))
-            reward_reshape = np.sum(reward_reshape, axis=1)  # [orig_batch]
+            reward_reshape = np.sum(reward_reshape, axis=1)
             reward_reshape = (reward_reshape > 0)
             num_ep_correct = np.sum(reward_reshape)
             if np.isnan(train_loss):
@@ -230,9 +259,7 @@ class Trainer(object):
             self.qt = episode.get_query_tim()
             feed_dict[self.query_relation] = self.qr
             feed_dict[self.query_tim] = self.qt
-            # set initial beam probs
             beam_probs = np.zeros((temp_batch_size * self.test_rollouts, 1))
-            # get initial state
             state = episode.get_state()
             mem = self.agent.get_mem_shape()
             agent_mem = np.zeros((mem[0], mem[1], temp_batch_size*self.test_rollouts, mem[3]) ).astype('float32')
@@ -280,6 +307,7 @@ class Trainer(object):
                     state['next_entities'] = state['next_entities'][y, :]
                     agent_mem = agent_mem[:, :, y, :]
                     test_action_idx = x
+                    test_tim_idx = x
                     chosen_relation = state['next_relations'][np.arange(temp_batch_size*k), x]
                     chosen_tim = state['next_tims'][np.arange(temp_batch_size * k), x]
                     beam_probs = new_scores[y, x]
@@ -406,7 +434,6 @@ class Trainer(object):
             with open(self.path_logger_file_ + 'answers', 'w') as answer_file:
                 for a in answers:
                     answer_file.write(a)
-
         with open(self.output_dir + '/scores.txt', 'a') as score_file:
             score_file.write("Hits@1: {0:7.4f}".format(all_final_reward_1))
             score_file.write("\n")
@@ -432,10 +459,12 @@ class Trainer(object):
         idx = np.argsort(scores, axis=1)
         idx = idx[:, -k:]
         return idx.reshape((-1))
+
 if __name__ == '__main__':
     options = read_options()
     logger.setLevel(logging.INFO)
-    fmt = logging.Formatter('%(asctime)s: [ %(message)s ]', '%m/%d/%Y %I:%M:%S %p')
+    fmt = logging.Formatter('%(asctime)s: [ %(message)s ]',
+                            '%m/%d/%Y %I:%M:%S %p')
     console = logging.StreamHandler()
     console.setFormatter(fmt)
     logger.addHandler(console)
@@ -486,6 +515,3 @@ if __name__ == '__main__':
         trainer.test_environment = trainer.test_test_environment
         trainer.test_environment.test_rollouts = 100
         trainer.test(sess, beam=True, print_paths=True, save_model=False)
-        print ("options['nell_evaluation']")
-        if options['nell_evaluation'] == 0:
-            nell_eval(path_logger_file + "/" + "test_beam/" + "pathsanswers", trainer.data_input_dir+'/sort_test.pairs')
