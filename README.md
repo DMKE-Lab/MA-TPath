@@ -15,6 +15,7 @@ $ python trainer.py --base_output_dir output/{dataset-name} --path_length {path-
 ```
 ## Data Format
 To run MA-TPath on a custom graph based dataset, you would need the graph and the queries as 4-triple in the form of (e1,r, e2,tim). Where e1, and e2 are nodes connected by the edge r. The vocab can of the dataset can be created using the create_vocab.py file found in data/data preprocessing scripts. The vocab needs to be stores in the json format {'entity/relation/tim': ID}. 
+
 | MINERVA| [link](https://github.com/shehzaadzd/MINERVA)|
 ## Baselines
 | Baselines                           | Code                                                         |
