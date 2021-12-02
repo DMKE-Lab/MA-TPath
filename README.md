@@ -25,5 +25,5 @@ To run MA-TPath on a custom graph based dataset, you would need the graph and th
 | HyTE                                | [link](https://github.com/malllabiisc/HyTE)                  |
 | TA-TransE / TA-DistMult             | [link](https://github.com/INK-USC/RE-Net)                    |
 | DE-TransE / DE-DistMult / DE-SimplE | [link](https://github.com/BorealisAI/DE-SimplE)              |
-| RE-NEW                              | [link](https://github.com/INK-USC/RE-Net)                    |
+| RE-NET                              | [link](https://github.com/INK-USC/RE-Net)                    |
 | TPmod                               | [link](https://github.com/DMKE-Lab/TPmod)                    |
